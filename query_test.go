@@ -44,6 +44,14 @@ func TestQuery(t *testing.T) {
 			expectedRows: [][]interface{}{{int64(1)}},
 		},
 		{
+			name:  "select @x",
+			query: "select @x",
+			args: []interface{}{
+				sql.NamedArg{Name: "x", Value: 1},
+			},
+			expectedRows: [][]interface{}{{int64(1)}},
+		},
+		{
 			name:         "unary minus operator",
 			query:        "SELECT -2",
 			expectedRows: [][]interface{}{{int64(-2)}},
@@ -5062,6 +5070,14 @@ SELECT @a + @b;
 			expectedErr: "not enough query arguments",
 		},
 		{
+			name: "too many named params given",
+			query: `
+SELECT @a + @b;
+`,
+			args:         []interface{}{sql.NamedArg{Name: "a", Value: 1}, sql.NamedArg{Name: "b", Value: 1}, sql.NamedArg{Name: "c", Value: 1}},
+			expectedRows: [][]interface{}{{int64(2)}},
+		},
+		{
 			name: "multiple statements with named params",
 			query: `
 CREATE TEMP TABLE t1 AS SELECT @a c1;
@@ -5099,6 +5115,64 @@ SELECT c1 * ? * ? FROM t1;
 `,
 			args:         []interface{}{int64(1), int64(2), int64(3)},
 			expectedRows: [][]interface{}{{int64(6)}},
+		},
+		{
+			name: "select an array named parameter",
+			query: `
+SELECT @states;
+`,
+			args: []interface{}{
+				sql.NamedArg{Name: "states", Value: []string{"WA", "WI", "WV", "WY"}},
+			},
+			expectedRows: [][]interface{}{{[]any{"WA", "WI", "WV", "WY"}}},
+		},
+		{
+			name: "FROM UNNEST with named parameter",
+			query: `
+SELECT * FROM UNNEST(@states);
+`,
+			args: []interface{}{
+				sql.NamedArg{Name: "states", Value: []string{"WA", "WI", "WV", "WY"}},
+			},
+			expectedRows: [][]interface{}{{"WA"}, {"WI"}, {"WV"}, {"WY"}},
+		},
+		{
+			name: "SELECT an array named parameter",
+			query: `
+SELECT @states;
+`,
+			args: []interface{}{
+				sql.NamedArg{Name: "states", Value: []string{"WA", "WI", "WV", "WY"}},
+			},
+			expectedRows: [][]interface{}{{[]any{"WA", "WI", "WV", "WY"}}},
+		},
+		{
+			name: "where in unnest",
+			query: `
+WITH x AS (select "WA" as id) SELECT * FROM x WHERE id in UNNEST(@states);
+`,
+			args: []interface{}{
+				sql.NamedArg{Name: "states", Value: []string{"WA", "WI", "WV", "WY"}},
+			},
+			expectedRows: [][]interface{}{{"WA"}},
+		},
+		{
+			name: "given an array of structs type as a parameter",
+			query: `
+SELECT * FROM UNNEST(@states);
+`,
+			args: []interface{}{
+				sql.NamedArg{Name: "states", Value: []struct {
+					Id   int64
+					Name string
+				}{{1, "WA"}, {2, "WI"}, {3, "WV"}, {4, "WY"}}},
+			},
+			expectedRows: [][]interface{}{
+				{int64(1), "WA"},
+				{int64(2), "WI"},
+				{int64(3), "WV"},
+				{int64(4), "WY"},
+			},
 		},
 	} {
 		test := test

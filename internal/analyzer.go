@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/goccy/go-zetasql"
 	parsed_ast "github.com/goccy/go-zetasql/ast"
@@ -193,6 +195,9 @@ func (a *Analyzer) Analyze(ctx context.Context, conn *Conn, query string, args [
 				return nil, err
 			}
 			a.opt.SetParameterMode(mode)
+			if err := a.addInferredQueryParameterToStmt(stmt, mode, args); err != nil {
+				return nil, err
+			}
 			out, err := zetasql.AnalyzeStatementFromParserAST(
 				query,
 				stmt,
@@ -215,6 +220,140 @@ func (a *Analyzer) Analyze(ctx context.Context, conn *Conn, query string, args [
 		})
 	}
 	return actionFuncs, nil
+}
+
+func (a *Analyzer) addInferredQueryParameterToStmt(stmt parsed_ast.StatementNode, mode zetasql.ParameterMode, args []driver.NamedValue) (err error) {
+	// clear query parameters to avoid error "Duplicate parameter name"
+	a.opt.ClearQueryParameters()
+	params := getParamsFromParsedNode(stmt)
+	// TODO: Positional parameter is not supported yet
+	if mode == zetasql.ParameterNamed {
+		for _, arg := range args {
+			for _, param := range params {
+				// check the parameter is used in stmt
+				if param.Name().Name() == arg.Name {
+					t := inferParamType(reflect.TypeOf(arg.Value), reflect.ValueOf(arg.Value))
+					if tt, ok := t.(types.Type); ok {
+						err = a.opt.AddQueryParameter(arg.Name, tt)
+						if err != nil {
+							return fmt.Errorf("failed to add query parameter: %w", err)
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+var (
+	int64ParamType      = types.Int64Type()
+	float64ParamType    = types.FloatType()
+	boolParamType       = types.BoolType()
+	stringParamType     = types.StringType()
+	bytesParamType      = types.BytesType()
+	dateParamType       = types.DateType()
+	timeParamType       = types.TimeType()
+	dateTimeParamType   = types.DatetimeType()
+	timestampParamType  = types.TimestampType()
+	numericParamType    = types.NumericType()
+	bigNumericParamType = types.BigNumericType()
+	geographyParamType  = types.GeographyType()
+	intervalParamType   = types.IntervalType()
+	jsonParamType       = types.JsonType()
+)
+
+var (
+	typeOfGoTime = reflect.TypeOf(time.Time{})
+	//typeOfIntervalValue       = reflect.TypeOf(&IntervalValue{})
+	//typeOfQueryParameterValue = reflect.TypeOf(&QueryParameterValue{})
+)
+
+func inferParamType(t reflect.Type, v reflect.Value) types.Type {
+	if t == nil {
+		return nil
+	}
+	switch t {
+	case typeOfGoTime:
+		return timestampParamType
+	}
+	switch t.Kind() {
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint8, reflect.Uint16, reflect.Uint32:
+		return int64ParamType
+
+	case reflect.Float32, reflect.Float64:
+		return float64ParamType
+
+	case reflect.Bool:
+		return boolParamType
+
+	case reflect.String:
+		return stringParamType
+
+	case reflect.Slice:
+		if t.Elem().Kind() == reflect.Uint8 {
+			return bytesParamType
+		}
+		fallthrough
+
+	case reflect.Array:
+		et := inferParamType(t.Elem(), v.Index(0))
+		if et == nil {
+			return nil
+		}
+		switch et {
+		case int64ParamType:
+			return types.Int64ArrayType()
+		case float64ParamType:
+			return types.FloatArrayType()
+		case boolParamType:
+			return types.BoolArrayType()
+		case stringParamType:
+			return types.StringArrayType()
+		case bytesParamType:
+			return types.BytesArrayType()
+		case dateParamType:
+			return types.DateArrayType()
+		case timeParamType:
+			return types.TimeArrayType()
+		case dateTimeParamType:
+			return types.DatetimeArrayType()
+		case timestampParamType:
+			return types.TimestampArrayType()
+		case numericParamType:
+			return types.NumericArrayType()
+		case bigNumericParamType:
+			return types.BigNumericArrayType()
+		case geographyParamType:
+			return types.GeographyArrayType()
+		case intervalParamType:
+			return types.IntervalArrayType()
+		case jsonParamType:
+			return types.JsonArrayType()
+		default:
+			at, err := types.NewArrayType(et)
+			if err != nil {
+				return nil
+			}
+			return at
+		}
+
+	case reflect.Struct:
+		// TODO: check no attribute cycle/recursion
+		var fields []*types.StructField
+
+		for i := 0; i < t.NumField(); i++ {
+			f := t.Field(i)
+			field := types.NewStructField(f.Name, inferParamType(f.Type, v.Field(i)))
+			fields = append(fields, field)
+		}
+		st, err := types.NewStructType(fields)
+		if err != nil {
+			return nil
+		}
+		return st
+	}
+	return nil
 }
 
 func (a *Analyzer) context(
@@ -688,6 +827,31 @@ func getParamsFromNode(node ast.Node) []*ast.ParameterNode {
 				}
 			} else {
 				params = append(params, param)
+			}
+		}
+		return nil
+	})
+	return params
+}
+
+func getParamsFromParsedNode(node parsed_ast.Node) []*parsed_ast.ParameterExprNode {
+	var (
+		params       []*parsed_ast.ParameterExprNode
+		paramNameMap = map[string]struct{}{}
+	)
+	_ = parsed_ast.Walk(node, func(n parsed_ast.Node) error {
+		param, ok := n.(*parsed_ast.ParameterExprNode)
+		if ok {
+			if param.Name() != nil && len(param.Name().Name()) > 0 {
+				name := param.Name().Name()
+				if name != "" {
+					if _, exists := paramNameMap[name]; !exists {
+						params = append(params, param)
+						paramNameMap[name] = struct{}{}
+					}
+				} else {
+					params = append(params, param)
+				}
 			}
 		}
 		return nil
